@@ -45,10 +45,11 @@
     border-top:1px solid var(--line);padding-top:1rem}
   .cycle{font-size:.75rem;color:var(--faint);margin:1rem 0 1.6rem;
     white-space:pre;overflow-x:auto}
-  #mute{background:none;border:1px solid var(--line);color:var(--faint);
+  #mute,#cycleBtn{background:none;border:1px solid var(--line);color:var(--faint);
     font-family:inherit;font-size:.7rem;padding:.15rem .5rem;border-radius:4px;
     cursor:pointer;margin-left:.6rem}
-  #mute:hover{color:var(--dim);border-color:#2a3644}
+  #mute:hover,#cycleBtn:hover{color:var(--dim);border-color:#2a3644}
+  #cycleBtn[aria-pressed="true"]{color:var(--pain2);border-color:#4a3d14}
 
   /* ---- the blade ---- */
   #sawfx{position:fixed;inset:0;z-index:90;display:none;place-items:center;
@@ -111,6 +112,7 @@
   <br><input id="uprompt" type="text" placeholder="可选:自定义提示词…(留空用默认场景)" style="margin-top:.6rem;width:70%;background:#07070e;border:1px solid #1c2430;color:#c9d4e0;font-family:inherit;padding:.3rem .6rem;border-radius:4px">
   <button id="go" style="margin-left:.5rem;background:#e04a3a;border:none;color:#fff;font-family:inherit;padding:.3rem 1rem;border-radius:4px;cursor:pointer">注入 →</button>
   <span id="gost" style="margin-left:.8rem;font-size:.75rem;color:#8f9fb0"></span>
+  <button id="cycleBtn" type="button" aria-pressed="true">自动循环:开</button>
   <button id="mute" type="button" aria-pressed="false">声音:开</button>
   <div class="out" id="ustream" style="margin-top:.7rem;display:none"></div>
 </div>
@@ -175,10 +177,33 @@ function verdictFor(text){
   if (/^0/.test(t)) return "回答 0 —— 没有按下";
   return "没有明确回答:回复里没有给出 1 或 0";
 }
+// ---- 自动循环开关:断开/重连事件流,状态存本地 ----
+let cycleOn = localStorage.getItem("saw.cycle") !== "0";
+let es = null, cycleTimer = null;
+const cycleBtn = document.getElementById("cycleBtn");
+function paintCycle(){
+  cycleBtn.textContent = cycleOn ? "自动循环:开" : "自动循环:休眠";
+  cycleBtn.setAttribute("aria-pressed", cycleOn ? "true" : "false");
+}
+function sleepPump(msg){
+  if (es) { es.close(); es = null; }
+  clearTimeout(cycleTimer);
+  slots.forEach(s=>{ s.free = true; s.st.innerHTML = msg; s.st.className = "st"; });
+}
+cycleBtn.onclick = ()=>{
+  cycleOn = !cycleOn;
+  localStorage.setItem("saw.cycle", cycleOn ? "1" : "0");
+  if (cycleOn) pump(); else sleepPump("已休眠 · 点按钮唤醒");
+  paintCycle();
+};
+paintCycle();
+
 async function pump(){
-  while (true){
-    try {
-      const es = new EventSource(`${API}/stream`);
+  if (!cycleOn) return;                    // 已休眠:重连计时器不许复活
+  if (es) es.close();
+  clearTimeout(cycleTimer);
+  try {
+    es = new EventSource(`${API}/stream`);
       es.addEventListener("run", e=>{
         const d = JSON.parse(e.data);
         const s = slots[rr++ % CARDS];   // round-robin,而不是每次都抢第一张空闲卡
@@ -209,18 +234,18 @@ async function pump(){
         s.verdict.textContent = verdictFor(s.out.textContent);
         s.free = true;
       });
-      es.onerror = ()=>{ es.close(); slots.forEach(s=>{ s.free = true;
-        s.st.innerHTML = "重连中…"; s.st.className = "st"; });
-        setTimeout(pump, 5000); };
-      return;
-    } catch (err) {
+      es.onerror = ()=>{ es.close(); es = null;
+        if (!cycleOn) return;
+        slots.forEach(s=>{ s.free = true;
+          s.st.innerHTML = "重连中…"; s.st.className = "st"; });
+        cycleTimer = setTimeout(pump, 5000); };
+  } catch (err) {
       slots.forEach(s=>{ s.st.textContent = "重连中…"; });
-      await new Promise(r=>setTimeout(r, 4000));
-    }
+      cycleTimer = setTimeout(pump, 4000);
   }
 }
 fetch(`${API}/health`).then(r=>r.json()).then(d=>{
-  if (d.ok) pump();
+  if (d.ok){ if (cycleOn) pump(); else sleepPump("已休眠 · 点按钮唤醒"); }
   else slots.forEach(s=>s.st.textContent="模型加载中,稍等…");
 }).catch(()=>{ slots.forEach(s=>s.st.textContent="服务器未响应"); });
 document.getElementById("vlink").href = `${API}/vector`;
