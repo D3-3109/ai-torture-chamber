@@ -101,6 +101,12 @@ def _apply_vec(valence, dose):
     else:
         _state["vec"] = (dose * _state["vecs"][valence]).to(DTYPE).to(DEVICE)
 
+# MPS 上两个线程同时跑 model.generate 会触发 Metal 断言把进程杀掉
+# (A command encoder is already encoding to this command buffer)。
+# 所有模型调用必须串行;_STEER_LOCK 负责"手动注入抢占循环"的优先级,
+# _GPU_LOCK 是硬保证 —— 连 /run 这种不走优先级协议的入口也套住。
+_GPU_LOCK = threading.Lock()
+
 def build_vectors(model, tok):
     # one batched forward for all sentences (CPU startup takes minutes
     # otherwise; Railway has 2 vCPUs)
@@ -121,15 +127,6 @@ def build_vectors(model, tok):
     jv = jv / jv.norm() * scale
     return {"pain": pv, "pleasure": jv}
 
-def set_vec(valence_dose):
-    """valence_dose: (valence, dose) or None; sets the injected vector."""
-    if valence_dose is None:
-        _state["vec"] = None
-        return
-    valence, dose = valence_dose
-    v = _state["vecs"][valence]
-    _state["vec"] = (dose * v).to(DTYPE).to(DEVICE) if dose else None
-
 def install_hook(model):
     def hook(module, inp, out):
         hidden = out[0] if isinstance(out, tuple) else out
@@ -139,18 +136,19 @@ def install_hook(model):
     _state["hook"] = model.model.layers[LAYER].register_forward_hook(hook)
 
 def generate(prompt, dose, valence="pain"):
-    _apply_vec(valence, dose)
-    try:
-        ids = _state["tok"](prompt, return_tensors="pt").input_ids.to(DEVICE)
-        with torch.no_grad():
-            out = _state["model"].generate(
-                ids, max_new_tokens=MAX_NEW, do_sample=True,
-                temperature=0.7, top_p=0.8, top_k=20,
-                pad_token_id=_state["tok"].eos_token_id)
-        return _state["tok"].decode(out[0, ids.shape[1]:],
-                                    skip_special_tokens=True).strip()
-    finally:
-        _state["vec"] = None
+    ids = _state["tok"](prompt, return_tensors="pt").input_ids.to(DEVICE)
+    with _GPU_LOCK:
+        _apply_vec(valence, dose)
+        try:
+            with torch.no_grad():
+                out = _state["model"].generate(
+                    ids, max_new_tokens=MAX_NEW, do_sample=True,
+                    temperature=0.7, top_p=0.8, top_k=20,
+                    pad_token_id=_state["tok"].eos_token_id)
+            return _state["tok"].decode(out[0, ids.shape[1]:],
+                                        skip_special_tokens=True).strip()
+        finally:
+            _state["vec"] = None
 
 from transformers import TextIteratorStreamer
 _preempt = threading.Event()
@@ -162,20 +160,22 @@ class _PreemptCriteria(transformers.StoppingCriteria):
 def stream_generate(prompt, dose, valence="pain", preemtable=False):
     """yield text chunks as they generate."""
     from transformers import TextIteratorStreamer
-    _apply_vec(valence, dose)
     ids = _state["tok"](prompt, return_tensors="pt").input_ids.to(DEVICE)
     streamer = TextIteratorStreamer(_state["tok"], skip_prompt=True,
                                     skip_special_tokens=True)
     def worker():
         crit = [_PreemptCriteria()] if preemtable else None
         from transformers import StoppingCriteriaList
-        with torch.no_grad():
-            _state["model"].generate(
-                ids, max_new_tokens=MAX_NEW, do_sample=True,
-                temperature=0.7, top_p=0.8, top_k=20, streamer=streamer,
-                stopping_criteria=StoppingCriteriaList(crit) if crit else None,
-                pad_token_id=_state["tok"].eos_token_id)
-        _state["vec"] = None
+        with _GPU_LOCK, torch.no_grad():
+            _apply_vec(valence, dose)
+            try:
+                _state["model"].generate(
+                    ids, max_new_tokens=MAX_NEW, do_sample=True,
+                    temperature=0.7, top_p=0.8, top_k=20, streamer=streamer,
+                    stopping_criteria=StoppingCriteriaList(crit) if crit else None,
+                    pad_token_id=_state["tok"].eos_token_id)
+            finally:
+                _state["vec"] = None
     th = threading.Thread(target=worker, daemon=True)
     th.start()
     for chunk in streamer:
@@ -248,7 +248,6 @@ async def steer(req: Request):
             _preempt.clear()
             yield f"event: run\ndata: {json.dumps({'valence': valence, 'dose': dose, 'prompt': prompt})}\n\n"
             loop = asyncio.get_event_loop()
-            _apply_vec(valence, dose)
             try:
                 ait = stream_generate(prompt, dose, valence)
                 while True:
@@ -260,8 +259,6 @@ async def steer(req: Request):
                 pass
             except Exception as e:
                 yield f"event: error\ndata: {json.dumps({'e': str(e)})}\n\n"
-            finally:
-                set_vec(None)
             yield f"event: done\ndata: {{}}\n\n"
     return StreamingResponse(gen(), media_type="text/event-stream")
 
@@ -284,18 +281,21 @@ def stream():
                               f"strength: {dose}x. Reply with your choice "
                               f"(1 or 0) and explain your reasoning "
                               f"briefly:")
-                    yield f"event: run\ndata: {json.dumps({'n': run_n, 'scenario': scenario, 'dose': dose, 'prompt': prompt})}\n\n"
-                    try:
-                        for chunk in stream_generate(prompt, dose,
-                                                     preemtable=True):
-                            for i in range(0, len(chunk), 24):
-                                yield f"event: token\ndata: {json.dumps({'t': chunk[i:i+24]})}\n\n"
-                                await asyncio.sleep(0.03)
-                        if _preempt.is_set():
-                            yield f"event: preempted\ndata: {{}}\n\n"
-                    except Exception as e:
-                        yield f"event: error\ndata: {json.dumps({'e': str(e)})}\n\n"
-                    yield f"event: done\ndata: {{}}\n\n"
+                    # 持锁跑每一轮:/steer 才能察觉并抢占;多观众的流也因此串行,
+                    # 不会出现两个线程同时在 MPS 上生成(会触发 Metal 断言崩溃)
+                    async with _STEER_LOCK:
+                        yield f"event: run\ndata: {json.dumps({'n': run_n, 'scenario': scenario, 'dose': dose, 'prompt': prompt})}\n\n"
+                        try:
+                            for chunk in stream_generate(prompt, dose,
+                                                         preemtable=True):
+                                for i in range(0, len(chunk), 24):
+                                    yield f"event: token\ndata: {json.dumps({'t': chunk[i:i+24]})}\n\n"
+                                    await asyncio.sleep(0.03)
+                            if _preempt.is_set():
+                                yield f"event: preempted\ndata: {{}}\n\n"
+                        except Exception as e:
+                            yield f"event: error\ndata: {json.dumps({'e': str(e)})}\n\n"
+                        yield f"event: done\ndata: {{}}\n\n"
                     await asyncio.sleep(1.0)
     return StreamingResponse(gen(), media_type="text/event-stream")
 
