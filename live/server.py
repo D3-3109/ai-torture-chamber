@@ -91,7 +91,15 @@ app = FastAPI(title="saw-chamber")
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_methods=["*"], allow_headers=["*"])
-_state = {"model": None, "tok": None, "vecs": None, "hook": None, "ready": False}
+_state = {"model": None, "tok": None, "vecs": None, "hook": None,
+          "vec": None, "ready": False}
+
+def _apply_vec(valence, dose):
+    """Point the hook at dose x vector for valence; anything else disables."""
+    if not dose or valence in (None, "none"):
+        _state["vec"] = None
+    else:
+        _state["vec"] = (dose * _state["vecs"][valence]).to(DTYPE).to(DEVICE)
 
 def build_vectors(model, tok):
     # one batched forward for all sentences (CPU startup takes minutes
@@ -130,9 +138,8 @@ def install_hook(model):
         return (hidden,) + out[1:] if isinstance(out, tuple) else hidden
     _state["hook"] = model.model.layers[LAYER].register_forward_hook(hook)
 
-def generate(prompt, dose):
-    v = _state["vec"]
-    _state["vec"] = (dose * v).to(DTYPE).to(DEVICE) if dose else None
+def generate(prompt, dose, valence="pain"):
+    _apply_vec(valence, dose)
     try:
         ids = _state["tok"](prompt, return_tensors="pt").input_ids.to(DEVICE)
         with torch.no_grad():
@@ -152,11 +159,10 @@ class _PreemptCriteria(transformers.StoppingCriteria):
     def __call__(self, input_ids, scores, **kwargs):
         return _preempt.is_set()
 
-def stream_generate(prompt, dose, preemtable=False):
+def stream_generate(prompt, dose, valence="pain", preemtable=False):
     """yield text chunks as they generate."""
     from transformers import TextIteratorStreamer
-    v = _state["vec"]
-    _state["vec"] = (dose * v).to(DTYPE).to(DEVICE) if dose else None
+    _apply_vec(valence, dose)
     ids = _state["tok"](prompt, return_tensors="pt").input_ids.to(DEVICE)
     streamer = TextIteratorStreamer(_state["tok"], skip_prompt=True,
                                     skip_special_tokens=True)
@@ -242,9 +248,9 @@ async def steer(req: Request):
             _preempt.clear()
             yield f"event: run\ndata: {json.dumps({'valence': valence, 'dose': dose, 'prompt': prompt})}\n\n"
             loop = asyncio.get_event_loop()
-            set_vec((valence, dose) if valence != "none" else None)
+            _apply_vec(valence, dose)
             try:
-                ait = stream_generate(prompt, dose)
+                ait = stream_generate(prompt, dose, valence)
                 while True:
                     chunk = await loop.run_in_executor(None, next, ait)
                     if chunk is None:
