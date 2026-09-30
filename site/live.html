@@ -153,6 +153,7 @@ const API = (new URLSearchParams(location.search)).get("api")
 const cardsEl = document.getElementById("cards");
 const cycleEl = document.getElementById("cycle");
 let slots = [];
+let rr = 0;                    // 轮转指针:最近三轮各占一张卡
 for (let i=0;i<CARDS;i++){
   const c = document.createElement("div");
   c.className = "card";
@@ -165,7 +166,6 @@ for (let i=0;i<CARDS;i++){
     out:c.querySelector(".out"), verdict:c.querySelector(".verdict"),
     pp:c.querySelector(".pp"), free:true});
 }
-function slotFor(){ return slots.find(s=>s.free) || slots[0]; }
 function setDose(slot, dose){
   slot.dose.innerHTML = `<span class="bar" style="width:${dose*18}px"></span>痛苦 ${dose} / 8`;
 }
@@ -181,7 +181,7 @@ async function pump(){
       const es = new EventSource(`${API}/stream`);
       es.addEventListener("run", e=>{
         const d = JSON.parse(e.data);
-        const s = slotFor();
+        const s = slots[rr++ % CARDS];   // round-robin,而不是每次都抢第一张空闲卡
         s.free = false; s.cur = d;
         s.st.innerHTML = `直播 · 第 ${d.n} 轮`;
         s.st.className = "st live";
