@@ -29,7 +29,7 @@ import transformers, jlens
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "runs" / "exp29"
 OUT.mkdir(parents=True, exist_ok=True)
-os.environ["HF_HOME"] = "/Volumes/evol/hf_cache"
+os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 
 hf = transformers.AutoModelForCausalLM.from_pretrained(
     "Qwen/Qwen3-1.7B", dtype=torch.bfloat16).to("mps")

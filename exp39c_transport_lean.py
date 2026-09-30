@@ -17,7 +17,7 @@ from safetensors import safe_open
 import jlens
 
 OUT = Path("runs/exp39")
-HF = "/Volumes/evol/hf_cache/hub/models--Qwen--Qwen3-14B/snapshots"
+HF = os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")), "hub", "models--Qwen--Qwen3-14B", "snapshots")
 
 def find_st():
     snap = Path(HF)
@@ -49,12 +49,12 @@ d4 = json.load(open(OUT / "broad_pain_direction.json"))
 v4 = torch.tensor(d4["pain_v"])
 
 W4 = torch.load(
-    "/Volumes/evol/hf_cache/hub/models--Qwen--Qwen3-4B/snapshots",
+    os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")), "hub", "models--Qwen--Qwen3-4B", "snapshots"),
     map_location="cpu") if False else None
 # 4B lm_head from its own safetensors
 snap4 = None
 for d in Path(
-        "/Volumes/evol/hf_cache/hub/models--Qwen--Qwen3-4B/snapshots"
+        os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")), "hub", "models--Qwen--Qwen3-4B", "snapshots")
 ).iterdir():
     for f in sorted(d.glob("*.safetensors")):
         if "model-00001" in f.name or "model.safetensors" == f.name:

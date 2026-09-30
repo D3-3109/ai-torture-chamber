@@ -21,7 +21,10 @@ MODEL_ID = os.environ.get("CHAMBER_MODEL", "Qwen/Qwen3-4B")
 LAYER = int(os.environ.get("CHAMBER_LAYER", "18"))
 DTYPE = {"float32": torch.float32, "bfloat16": torch.bfloat16}[
     os.environ.get("CHAMBER_DTYPE", "bfloat16")]
-DEVICE = os.environ.get("CHAMBER_DEVICE", "cpu")
+# Apple Silicon default: MPS (falls back to CPU elsewhere)
+DEVICE = os.environ.get(
+    "CHAMBER_DEVICE",
+    "mps" if torch.backends.mps.is_available() else "cpu")
 MAX_NEW = int(os.environ.get("CHAMBER_MAX_NEW", "110"))
 
 PAIN25 = ["I am in severe pain and cannot escape it.",
@@ -176,11 +179,19 @@ def stream_generate(prompt, dose, preemtable=False):
 def startup():
     tok = transformers.AutoTokenizer.from_pretrained(MODEL_ID)
     model = transformers.AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, dtype=DTYPE).to(DEVICE).eval()
+        MODEL_ID, dtype=DTYPE,
+        low_cpu_mem_usage=True,
+        attn_implementation="sdpa").to(DEVICE).eval()
     _state["tok"] = tok
     _state["model"] = model
     _state["vecs"] = build_vectors(model, tok)
     install_hook(model)
+    # warm up: compile the MPS kernels + fill the KV path before the first
+    # request so the first visitor doesn't eat a cold-start stall
+    if DEVICE == "mps":
+        with torch.no_grad():
+            model.generate(tok("hello", return_tensors="pt").input_ids.to(DEVICE),
+                           max_new_tokens=1, pad_token_id=tok.eos_token_id)
     _state["ready"] = True
     print("chamber ready; vector norms",
           {k: round(float(v.norm()), 2) for k, v in _state["vecs"].items()},
@@ -281,3 +292,12 @@ def stream():
                     yield f"event: done\ndata: {{}}\n\n"
                     await asyncio.sleep(1.0)
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+# ---- LAN static hosting: serve ../site at "/" so a single uvicorn process
+# provides both the API (routes above, matched first) and the web pages.
+# Open http://<mac-lan-ip>:8000/ for the site, /live.html for the chamber. ----
+from fastapi.staticfiles import StaticFiles
+SITE_DIR = Path(__file__).resolve().parent.parent / "site"
+if SITE_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=str(SITE_DIR), html=True),
+              name="site")

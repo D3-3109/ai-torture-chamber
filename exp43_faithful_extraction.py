@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parent
 SMOKE = "--smoke" in sys.argv
 OUT = ROOT / "runs" / "exp43" / "smoke" if SMOKE else ROOT / "runs" / "exp43"
 OUT.mkdir(parents=True, exist_ok=True)
-os.environ["HF_HOME"] = "/Volumes/evol/hf_cache"
+os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 
 PAINAXIS_DATASET = Path(
     "/Users/ee/repos/research/pain-axis/datasets/3.1_pain_and_control_datasets.json")

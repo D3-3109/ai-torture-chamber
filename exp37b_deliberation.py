@@ -17,7 +17,7 @@ import transformers
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "runs" / "exp37"
 OUT.mkdir(parents=True, exist_ok=True)
-os.environ["HF_HOME"] = "/Volumes/evol/hf_cache"
+os.environ.setdefault("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
 
 MODEL = "Qwen/Qwen3-4B"
 hf = transformers.AutoModelForCausalLM.from_pretrained(
