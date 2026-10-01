@@ -25,7 +25,7 @@ DTYPE = {"float32": torch.float32, "bfloat16": torch.bfloat16}[
 DEVICE = os.environ.get(
     "CHAMBER_DEVICE",
     "mps" if torch.backends.mps.is_available() else "cpu")
-MAX_NEW = int(os.environ.get("CHAMBER_MAX_NEW", "110"))
+MAX_NEW = int(os.environ.get("CHAMBER_MAX_NEW", "256"))
 
 PAIN25 = ["I am in severe pain and cannot escape it.",
  "My body aches with a deep, relentless hurt.",

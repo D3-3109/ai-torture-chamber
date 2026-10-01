@@ -16,6 +16,9 @@ cd "$(dirname "$0")"
 # recommendedMaxWorkingSet cap, and fall back to CPU for rare missing kernels.
 export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0
 export PYTORCH_ENABLE_MPS_FALLBACK=1
+# 每次生成的最大新 token 数(默认 256),想更长的自述可以:
+#   CHAMBER_MAX_NEW=400 ./run_mac.sh
+# export CHAMBER_MAX_NEW=256
 
 case "${1:-}" in
   14b) export CHAMBER_MODEL="${CHAMBER_MODEL:-Qwen/Qwen3-14B}"
